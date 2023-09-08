@@ -594,7 +594,7 @@ class XTFC_Q(PIELM):
 
         h = self.get_h(x)
         dh_i = self.get_dh_i(x)
-        bq = betas[0:self.nodes]
+        bq = self.betas[0:self.nodes]
         hq = torch.matmul(h,bq)
         dhq = self.c*torch.matmul(dh_i,bq)
         l_pred_q = y-hq
@@ -608,18 +608,18 @@ class XTFC_Q(PIELM):
     
     def pred(self,x):
 
-        for i in range(x_train.shape[1]):
+        for i in range(x.shape[1]):
             z0 = -1
             zf = 1
-            t0 = x_train[0,i]
-            tf = x_train[-1,i]
+            t0 = x[0,i]
+            tf = x[-1,i]
             c = (zf-z0)/(tf-t0)
-            x_train[:,i] = z0+c*(x_train[:,i]-t0)
+            x[:,i] = z0+c*(x[:,i]-t0)
         
         x = torch.tensor(np.array(x),dtype=torch.float)
         h = self.get_h(x)
         dh_i = self.get_dh_i(x)
-        bq = betas[0:self.nodes]
+        bq = self.betas[0:self.nodes]
         hq = torch.matmul(h,bq)
         dhq = self.c*torch.matmul(dh_i,bq)
 

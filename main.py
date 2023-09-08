@@ -12,8 +12,23 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+def customReward(state):
+    
+    maxX = 2.4
+    minX = -2.4
+    maxDX = 10
+    minDX = -10
+    maxTheta = 0.2095
+    minTheta = -0.2095
+    maxDTheta = 10
+    minDTheta  = -10
 
+    goalX = abs(state[0])
+    goalDX = abs(state[1])
+    goalTheta = abs(state[2])
+    goalDTheta = abs(state[3])
 
+    return goalX+goalDX+goalTheta+goalDTheta
 
 class ReplayMemory(object):
 
@@ -43,6 +58,8 @@ EPS_END = 0.05
 EPS_DECAY = 1000
 TAU = 0.005
 LR = 1e-4
+simEpisodes = 20
+
 
 # Get number of actions from gym action space
 n_actions = env.action_space.n
@@ -50,21 +67,20 @@ n_actions = env.action_space.n
 state, info = env.reset()
 n_observations = int(len(state)/2)
 
-transferFunctionNetwork = XTFC(n_nodes=n_nodes,input_size=n_actions+1,output_size=n_observations,length=0)
+transferFunctionNetwork = XTFC_S(n_nodes=n_nodes,input_size=n_actions+1,output_size=n_observations,length=0)
 qValueNetwork = XTFC_Q(n_nodes=n_nodes,input_size=n_actions+1,output_size=n_observations,length=0)
 
-
-policy_net = DQN(n_observations, n_actions).to(device)
-target_net = DQN(n_observations, n_actions).to(device)
-target_net.load_state_dict(policy_net.state_dict())
-
-optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
 memory = ReplayMemory(10000)
 
-steps_done = 0
+for i in range(simEpisodes):
+    actionPrediction = np.argmax(XTFC_Q.pred(state)[:,0].numpy())
+    next_state, reward, terminated, truncated, _ = env.step(actionPrediction)
+    memory.push(state, actionPrediction, next_state, reward)
+    state = next_state
+    if terminated:
+        
 
-
-episode_durations = []
+    
 
 
 
