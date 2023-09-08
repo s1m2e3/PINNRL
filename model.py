@@ -241,6 +241,7 @@ class XTFC_S(PIELM):
         self.betas = torch.ones(size=(output_size*n_nodes,),requires_grad=True,dtype=torch.float)
         self.controls = controls
         self.physics = physics
+        
 
     def train(self,accuracy, n_iterations,x_train,y_train,lambda_=1):
         
@@ -540,6 +541,7 @@ class XTFC_Q(PIELM):
         self.physics = physics
         self.epsilon = 1
         self.epsilon_decay = 1e-3
+        self.z={"max":{0:2.4,1:10,2:0.2095,3:10},"min":{0:-2.4,1:-10,2:-0.2095,3:-10}}
 
     def train(self,accuracy, n_iterations,x_train,y_train,lambda_=1):
         
@@ -607,20 +609,23 @@ class XTFC_Q(PIELM):
         return torch.mul((1-self.get_h(x)**2),torch.transpose(self.W,0,1))
     
     def pred(self,x):
-
-        for i in range(x.shape[1]):
+        
+        for i in range(len(x)):
             z0 = -1
             zf = 1
-            t0 = x[0,i]
-            tf = x[-1,i]
+            t0 = self.z["min"][i]
+            tf = self.z["max"][i]
             c = (zf-z0)/(tf-t0)
-            x[:,i] = z0+c*(x[:,i]-t0)
+            x[i] = z0+c*(x[i]-t0)
         
         x = torch.tensor(np.array(x),dtype=torch.float)
         h = self.get_h(x)
         dh_i = self.get_dh_i(x)
-        bq = self.betas[0:self.nodes]
-        hq = torch.matmul(h,bq)
-        dhq = self.c*torch.matmul(dh_i,bq)
-
-        return torch.vstack((hq,dhq))
+        bq_1 = self.betas[0:self.nodes]
+        bq_2 = self.betas[self.nodes:self.nodes*2]
+        
+        hq_1 = torch.matmul(h,bq_1)
+        hq_2 = torch.matmul(h,bq_2)
+        # dhq = self.c*torch.matmul(dh_i,bq)
+        return torch.vstack((hq_1,hq_2))
+        # return torch.vstack((hq,dhq))
