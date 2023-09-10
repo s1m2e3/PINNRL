@@ -229,20 +229,22 @@ class PIELM:
         return torch.vstack((x_pred,y_pred,theta_pred,delta_pred))
 
 class XTFC_S(PIELM):
-    def __init__(self,n_nodes,input_size,output_size,length,low_w=-5,high_w=5,low_b=-5,high_b=5,activation_function="tanh",controls=False,physics=False):
-        super().__init__(n_nodes,input_size,output_size,length,low_w=-5,high_w=5,low_b=-5,high_b=5,activation_function="tanh",controls=False,physics=False)
+    def __init__(self,n_nodes,input_size,output_size,length,low_w=-10,high_w=10,low_b=-10,high_b=10,activation_function="tanh",controls=False,physics=False):
+        super().__init__(n_nodes,input_size,output_size,length,low_w=-10,high_w=10,low_b=-10,high_b=10,activation_function="tanh",controls=False,physics=False)
         self.length= length
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.nodes = n_nodes
         self.W = (torch.randn(size=(n_nodes,input_size),dtype=torch.float)*(high_w-low_w)+low_w)
         self.W_t = self.W[:,0]
+        self.W_t = self.W_t.reshape(len(self.W_t),1)
         self.W_a =  self.W[:,1:]
         self.b = (torch.randn(size=(n_nodes,1),dtype=torch.float)*(high_b-low_b)+low_b)
-        self.betas = torch.ones(size=(output_size*n_nodes,),requires_grad=True,dtype=torch.float)
+        self.betas = torch.ones(size=(n_nodes,output_size),requires_grad=True,dtype=torch.float)
         self.controls = controls
         self.physics = physics
-        
-
+        self.z={"max":{0:500,1:1},"min":{0:0,1:0}}
+        self.iters=0
+        self.p = 0
     def train(self,accuracy, n_iterations,x_train,y_train,lambda_=1):
         
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -252,32 +254,39 @@ class XTFC_S(PIELM):
         
         ## Assuming x_train has the following shape, vector of time appended to vector of actions
 
-        z0 = -1
-        zf = 1
-        t0 = x_train[0,0]
-        tf = x_train[-1,0]
-        c = (zf-z0)/(tf-t0)
-        x_train[:,0] = z0+c*(x_train[:,0]-t0)
+         ## Assuming x_train has the following shape, vector of time appended to vector of actions
+        
 
-        self.c = c
+        for i in range(x_train.shape[1]):
+            z0 = -1
+            zf = 1
+            t0 = self.z["min"][i]
+            tf = self.z["max"][i]
+            c = (zf-z0)/(tf-t0)
+            x_train[:,i] = z0+c*(x_train[:,i]-t0)
+            if i==0:
+                self.c = c
         self.x_train = torch.tensor(x_train,dtype=torch.float)
         self.y_train = torch.tensor(y_train,dtype=torch.float)
-        print(self.betas.is_cuda)
-        print("number of samples:",len(self.x_train))
-        while count < n_iterations:
-            
-            with torch.no_grad():
-                
-                jac = jacobian(self.predict_jacobian,self.betas)
-                loss = self.predict_loss(self.x_train,self.y_train)
-                pinv_jac = torch.linalg.pinv(jac)
-                delta = torch.matmul(pinv_jac,loss)
-                self.betas -=delta*0.1
-            if count %10==0:
-                print(loss.abs().max(dim=0),loss.mean(dim=0))
-                print("final loss:",(loss**2).mean())
-                print(count)
-            count +=1
+        h = self.get_h(self.x_train)
+        dh = self.c*self.get_dh_t(self.x_train)
+        h = torch.vstack((h,dh))
+        if self.iters==0:
+            self.p = torch.linalg.pinv(torch.matmul(torch.transpose(h,0,1),h))
+            self.betas = torch.matmul(torch.matmul(self.p,torch.transpose(h,0,1)),self.y_train)
+        else:
+            hph = torch.matmul(torch.matmul(h,self.p),torch.transpose(h,0,1))
+            hph_inv = torch.linalg.pinv(torch.eye(len(hph))+hph)
+            pht = torch.matmul(self.p,torch.transpose(h,0,1))
+            hp = torch.matmul(h,self.p)
+            update = torch.matmul(torch.matmul(pht,hph_inv),hp)
+            self.p = self.p - update
+            differential = (self.y_train-torch.matmul(h,self.betas))
+            update = torch.matmul(torch.matmul(self.p,torch.transpose(h,0,1)),differential)
+            self.betas +=  update 
+        y_pred =torch.matmul(h,self.betas)
+        self.iters+=1 
+        print(((y_pred-self.y_train)**2).mean(),"iter:%i",self.iters)
         
 
     def predict_jacobian(self,betas):

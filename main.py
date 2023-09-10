@@ -22,6 +22,8 @@ def extract(df,newDf):
         iteration = np.concatenate((iteration,new_states),axis=1)
         time = np.arange(len(states)).reshape(len(states),1)
         iteration = np.concatenate((iteration,time),axis=1)
+        episode = np.ones(len(states)).reshape(len(states),1)*i
+        iteration = np.concatenate((iteration,episode),axis=1)
         newDf = pd.concat((newDf,pd.DataFrame(iteration)),axis=0)
     newDf=newDf.reset_index(drop=True)
     return newDf
@@ -61,7 +63,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward','count','episode'))
 
-n_nodes = 64
+n_nodes = 32
 BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 0.9
@@ -79,7 +81,8 @@ n_actions = env.action_space.n
 state, info = env.reset()
 n_observations = len(state)
 
-transferFunctionNetwork = XTFC_S(n_nodes=n_nodes,input_size=n_actions+1,output_size=n_observations,length=0)
+
+
 qValueNetwork = XTFC_Q(n_nodes=n_nodes,input_size=n_observations,output_size=n_actions,length=0,epsilon=1)
 
 memory = ReplayMemory(10000)
@@ -117,10 +120,20 @@ for i in range(simEpisodes):
         count+= 1
 
 df = pd.DataFrame.from_dict(data).T
+accuracy = 1e-4
+iterations = 1
 new_df = pd.DataFrame()
 new_df = extract(df,new_df)
-print(new_df[4])
-# transferFunctionNetwork.train(100,5,)
+transferFunctionNetwork = XTFC_S(n_nodes=n_nodes,input_size=n_actions,output_size=int(n_observations/2),length=0)
+for i in new_df[10].unique():
+    sub_df = new_df[new_df[10]==i]
+    x_train = np.array(sub_df[[9,4]])
+    y_train_t = np.array(sub_df[[5,7]])
+    y_train_dt = np.array(sub_df[[6,8]])
+    y_train = np.concatenate((y_train_t,y_train_dt))
+    transferFunctionNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=x_train,y_train=y_train)
+# x_train = new_df[]
+
     
 
 
