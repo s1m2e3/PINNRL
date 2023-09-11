@@ -1,4 +1,4 @@
-from model import *
+from model_dqn import *
 import gymnasium as gym
 import math
 import random
@@ -115,7 +115,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward','count','episode'))
 
-n_nodes = 512
+n_nodes = 256
 BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 0.9
@@ -123,7 +123,7 @@ EPS_END = 0.05
 EPS_DECAY = 1000
 TAU = 0.005
 LR = 1e-4
-simEpisodes = 200
+simEpisodes = 500
 simTrainings = 100
 
 # Get number of actions from gym action space
@@ -135,56 +135,81 @@ n_observations = len(state)
 
 episode_durations = []
 data = {}
-total_rewards={"elm":{},"random":{},"elm proxy":{}}
+total_rewards={"DQN":{},"random":{},"DQN proxy":{}}
 plt.figure()
-for name in ["elm",'random',"elm proxy"]:
-    qValueNetwork = XTFC_Q(n_nodes=n_nodes,input_size=n_observations,output_size=n_actions,length=0,epsilon=1)
-    transferFunctionNetwork = XTFC_S(n_nodes=64,input_size=n_actions,output_size=int(n_observations/2),length=0)
+for name in ["DQN","random"]:
+
+    
+    qValueNetworkPolicy = NN(hidden_size=n_nodes,input_size1=n_observations,output_size=n_actions)
+    qValueNetworkTarget = NN(hidden_size=n_nodes,input_size1=n_observations,output_size=n_actions)
+    transferFunctionNetwork = NN(hidden_size=n_nodes,input_size1=n_actions+n_observations,output_size=n_observations)
     memory = ReplayMemory(10000)
+    count = 0
     for i in range(simEpisodes):
-        count = 0
+        
         done = False
         state,info = env.reset()
         data[i]={"state":[],"action":[],"next_state":[],"reward":[]}
         
-        if i % 20==0 and i>0 and name == "elm proxy":
-            qValueNetwork=predictFuture(qValueNetwork,transferFunctionNetwork,state)
+        # if i % 20==0 and i>0 and name == "elm proxy":
+        #     qValueNetwork=predictFuture(qValueNetwork,transferFunctionNetwork,state)
     
         
         while not done:
-            if qValueNetwork.epsilon<random.random() and (name =="elm" or name =="elm proxy"):
-                pred = qValueNetwork.pred(x=state).detach()
-                actionPrediction = np.argmax(pred[:,0].numpy())
-                # input("hey")
+            if qValueNetworkPolicy.epsilon<random.random() and (name =="DQN" or name =="elm proxy"):
+                pred = qValueNetworkPolicy.forward(x=state).detach()
+                actionPrediction = np.argmax(pred.numpy())
+                
             
             else: 
             
                 actionPrediction = random.choice([0,1])
-                qValueNetwork.epsilon -= qValueNetwork.epsilon_decay
+                qValueNetworkPolicy.epsilon -= qValueNetworkPolicy.epsilon_decay
 
             next_state, reward, terminated, truncated, _ = env.step(actionPrediction)
-            memory.push(state, actionPrediction, next_state, reward,count,i)
-            data[i]["state"].append(state)
-            data[i]["action"].append(actionPrediction)
-            data[i]["next_state"].append(next_state)
+            memory.push(torch.tensor(state), torch.tensor(actionPrediction).unsqueeze(0), torch.tensor(next_state), torch.tensor(reward).unsqueeze(0),count,i)
+            if count>BATCH_SIZE:
+                transitions=memory.sample(BATCH_SIZE)
+                batch = Transition(*zip(*transitions))
+
+                # Compute a mask of non-final states and concatenate the batch elements
+                # (a final state would've been the one after which simulation ended)
+                non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                                    batch.next_state)), device=device, dtype=torch.bool)
+                non_final_next_states = torch.cat([s for s in batch.next_state
+                                                            if s is not None]).reshape(BATCH_SIZE,4)
+                state_batch = torch.cat(batch.state).reshape(BATCH_SIZE,4)
+                action_batch = torch.cat(batch.action).reshape(BATCH_SIZE,1)
+                reward_batch = torch.cat(batch.reward).reshape(BATCH_SIZE,1)
+
+                # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+                # columns of actions taken. These are the actions which would've been taken
+                # for each batch state according to policy_net
+                state_action_values = qValueNetworkPolicy(state_batch).gather(1, action_batch)
+                # state_action_values = qValueNetworkPolicy(state_batch)
+                
+                # Compute V(s_{t+1}) for all next states.
+                # Expected values of actions for non_final_next_states are computed based
+                # on the "older" target_net; selecting their best reward with max(1)[0].
+                # This is merged based on the mask, such that we'll have either the expected
+                # state value or 0 in case the state was final.
+                next_state_values = torch.zeros(BATCH_SIZE, device=device)
+                
+                with torch.no_grad():
+                    next_state_values[non_final_mask] = qValueNetworkTarget(non_final_next_states).max(1)[0]
+                next_state_values=next_state_values.reshape(BATCH_SIZE,1)
+                # Compute the expected Q values
+                expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+                qValueNetworkPolicy.train(1,x_train_data=state_batch,y_train_data=expected_state_action_values)
+                
+                # Soft update of the target network's weights
+                # θ′ ← τ θ + (1 −τ )θ′
+                qValueNetworkTargetDict = qValueNetworkTarget.state_dict()
+                qValueNetworkPolicyDict = qValueNetworkPolicy.state_dict()
+                for key in qValueNetworkPolicyDict:
+                    qValueNetworkTargetDict[key] = qValueNetworkPolicyDict[key]*TAU + qValueNetworkTargetDict[key]*(1-TAU)
+                qValueNetworkTarget.load_state_dict(qValueNetworkTargetDict)
             data[i]["reward"].append(reward)
-            
-
-            next_state = np.array(next_state)
-            rewards = np.array(reward)
-            current_state = np.array(state)
-            q_pred = qValueNetwork.pred(x=next_state).detach().numpy()
-            q_indexes = np.argmax(q_pred,axis=1)
-            y_train = np.array([q_pred[i,q_indexes[i]]for i in range(len(q_pred))])*GAMMA+rewards
-            _,_,_,_=qValueNetwork.train(accuracy=1,n_iterations=1,x_train=current_state,y_train=y_train)
-            # x_train = np.array(sub_df[[9,4]])
-            # y_train_t = np.array(sub_df[[5,7]])
-            # y_train_dt = np.array(sub_df[[6,8]])
-            # y_train = np.concatenate((y_train_t,y_train_dt))
-            # transferFunctionNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=x_train,y_train=y_train)
-            # qValueNetwork=trainQExistingData(qValueNetwork,new_df)
-            
-
 
             state = next_state
             done = terminated or truncated
@@ -215,11 +240,11 @@ for name in ["elm",'random',"elm proxy"]:
         #         
             # qValueNetwork=predictFuture(qValueNetwork,new_df)
 
-plt.plot(list(total_rewards["elm"]),list(total_rewards["elm"].values()))
+plt.plot(list(total_rewards["DQN"]),list(total_rewards["DQN"].values()))
 plt.plot(list(total_rewards["random"]),list(total_rewards["random"].values()))        
-plt.plot(list(total_rewards["elm proxy"]),list(total_rewards["elm proxy"].values()))        
-plt.legend(["ELM","random walk","ELM Proxy"])
-# plt.legend(["ELM","random walk"])
+# plt.plot(list(total_rewards["elm proxy"]),list(total_rewards["elm proxy"].values()))        
+# plt.legend(["ELM","random walk","ELM Proxy"])
+plt.legend(["DQN","random walk"])
 plt.show()
 
 
