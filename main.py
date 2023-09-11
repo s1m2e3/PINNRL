@@ -65,7 +65,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward','count','episode'))
 
-n_nodes = 64
+n_nodes = 15
 BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 0.9
@@ -137,7 +137,7 @@ for i in new_df[11].unique():
     y_train = np.concatenate((y_train_t,y_train_dt))
     transferFunctionNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=x_train,y_train=y_train)
 
-for i in range(simTrainings):
+for i in range(3):
     for i in new_df[11].unique():
         sub_df = new_df[new_df[11]==i]
         current_state = np.array(sub_df[[0,1,2,3]])
@@ -146,8 +146,8 @@ for i in range(simTrainings):
         q_pred = qValueNetwork.pred(x=next_state).detach().numpy()
         q_indexes = np.argmax(q_pred,axis=1)
         y_train = np.array([q_pred[i,q_indexes[i]]for i in range(len(q_pred))])*GAMMA+rewards
-        
-        input("hey")
+        qValueNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=current_state,y_train=y_train)
+
 
     #     pred =qValueNetwork.pred(x=state).detach()
     #     state_action_values = policy_net(state_batch).gather(1, action_batch)

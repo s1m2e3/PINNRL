@@ -634,6 +634,9 @@ class XTFC_Q(PIELM):
         self.epsilon = 1
         self.epsilon_decay = 1e-3
         self.z={"max":{0:2.4,1:10,2:0.2095,3:10},"min":{0:-2.4,1:-10,2:-0.2095,3:-10}}
+        self.iters = 0
+        self.p_1=0
+        self.p_2=0
 
     def train(self,accuracy, n_iterations,x_train,y_train,lambda_=1):
         
@@ -641,8 +644,6 @@ class XTFC_Q(PIELM):
         count = 0
         error = 100
         self.lambda_ = lambda_
-        print(x_train.shape)
-        input("hey")
         ## Assuming x_train has the following shape, vector of time appended to vector of actions
         for i in range(x_train.shape[1]):
             z0 = -1
@@ -651,28 +652,69 @@ class XTFC_Q(PIELM):
             tf = x_train[-1,i]
             c = (zf-z0)/(tf-t0)
             x_train[:,i] = z0+c*(x_train[:,i]-t0)
-
-        self.c = c
-        self.x_train = torch.tensor(x_train,dtype=torch.float)
-        self.y_train = torch.tensor(y_train,dtype=torch.float)
-        print(self.betas.is_cuda)
-        print("number of samples:",len(self.x_train))
-        h = self.get_h(self.x_train)
-        self.betas = torch.matmul(torch.linalg.pinv(h),self.y_train)
-        while count < n_iterations:
-            
-            with torch.no_grad():
-                jac = jacobian(self.predict_jacobian,self.betas)
-                loss = self.predict_loss(self.x_train,self.y_train)
-                pinv_jac = torch.linalg.pinv(jac)
-                delta = torch.matmul(pinv_jac,loss)
-                self.betas -=delta*0.1
-            if count %10==0:
-                print(loss.abs().max(dim=0),loss.mean(dim=0))
-                print("final loss:",(loss**2).mean())
-                print(count)
-            count +=1
+        x_train = torch.tensor(np.array(x_train),dtype=torch.float)
+        h = self.get_h(x_train)
+        # dh_i = self.get_dh_i(x)
+        bq_1 = self.betas[0:self.nodes]
+        bq_2 = self.betas[self.nodes:self.nodes*2]
         
+        hq_1 = torch.matmul(h,bq_1)
+        hq_2 = torch.matmul(h,bq_2)
+        # dhq = self.c*torch.matmul(dh_i,bq)
+        q_pred = torch.transpose(torch.vstack((hq_1,hq_2)),0,1)
+        q_indexes = np.argmax(q_pred.detach().numpy(),axis=1)
+        q_indexes_1 = [i for i in range(len(q_indexes)) if q_indexes[i]==0]
+        q_indexes_2 = [i for i in range(len(q_indexes)) if q_indexes[i]==1]
+        y_train_1 = torch.tensor(y_train[q_indexes_1].reshape(len(q_indexes_1),1),dtype=torch.float)
+        y_train_2 = torch.tensor(y_train[q_indexes_2].reshape(len(q_indexes_2),1),dtype=torch.float)
+        
+        h_1 = h[q_indexes_1,:].reshape(len(q_indexes_1),h.shape[1])
+        h_2 = h[q_indexes_2,:].reshape(len(q_indexes_2),h.shape[1])
+        
+        print(((hq_1.detach().numpy()-y_train_1.detach().numpy())**2).mean(),"loss of action 1 before iteration:%i",self.iters)
+        print(((hq_2.detach().numpy()-y_train_2.detach().numpy())**2).mean(),"loss of action 2 before iteration:%i",self.iters)
+        with torch.no_grad():
+            if self.iters==0:
+
+                self.p_1 = torch.linalg.pinv(torch.matmul(torch.transpose(h_1,0,1),h_1))
+                self.betas[0:self.nodes] = torch.matmul(torch.matmul(self.p_1,torch.transpose(h_1,0,1)),y_train_1).reshape(self.betas[0:self.nodes].shape)
+                 
+
+                self.p_2 = torch.linalg.pinv(torch.matmul(torch.transpose(h_2,0,1),h_2))
+                self.betas[self.nodes:self.nodes*2] = torch.matmul(torch.matmul(self.p_2,torch.transpose(h_2,0,1)),y_train_2).reshape(self.betas[self.nodes:self.nodes*2].shape)
+
+            else:
+
+                hph = torch.matmul(torch.matmul(h_1,self.p_1),torch.transpose(h_1,0,1))
+                hph_inv = torch.linalg.pinv(torch.eye(len(hph))+hph)
+                pht = torch.matmul(self.p_1,torch.transpose(h_1,0,1))
+                hp = torch.matmul(h_1,self.p_1)
+                update = torch.matmul(torch.matmul(pht,hph_inv),hp)
+                self.p_1 = self.p_1 - update
+                differential = (y_train_1-torch.matmul(h_1,self.betas[0:self.nodes]).reshape(y_train_1.shape))
+                update = torch.matmul(torch.matmul(self.p_1,torch.transpose(h_1,0,1)),differential).reshape((self.betas[0:self.nodes].shape))
+                self.betas[0:self.nodes] +=  update 
+
+                hph = torch.matmul(torch.matmul(h_2,self.p_2),torch.transpose(h_2,0,1))
+                hph_inv = torch.linalg.pinv(torch.eye(len(hph))+hph)
+                pht = torch.matmul(self.p_2,torch.transpose(h_2,0,1))
+                hp = torch.matmul(h_2,self.p_2)
+                update = torch.matmul(torch.matmul(pht,hph_inv),hp)
+                self.p_2 = self.p_2 - update
+                differential = (y_train_2-torch.matmul(h_2,self.betas[self.nodes:self.nodes*2]).reshape(y_train_2.shape))
+                update = torch.matmul(torch.matmul(self.p_2,torch.transpose(h_2,0,1)),differential).reshape((self.betas[self.nodes:self.nodes*2].shape))
+                self.betas[self.nodes:self.nodes*2] +=  update
+        
+        bq_1 = self.betas[0:self.nodes]
+        bq_2 = self.betas[self.nodes:self.nodes*2]
+        hq_1 = torch.matmul(h_1,bq_1)
+        hq_2 = torch.matmul(h_2,bq_2)
+        
+        print(((hq_1.detach().numpy()-y_train_1.detach().numpy())**2).mean(),"loss of action 1 after iteration:%i",self.iters)
+        print(((hq_2.detach().numpy()-y_train_2.detach().numpy())**2).mean(),"loss of action 2 after iteration:%i",self.iters)
+
+        self.iters+=1 
+        return 
 
     def predict_jacobian(self,betas):
 
