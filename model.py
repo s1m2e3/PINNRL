@@ -229,8 +229,9 @@ class PIELM:
         return torch.vstack((x_pred,y_pred,theta_pred,delta_pred))
 
 class XTFC_S(PIELM):
-    def __init__(self,n_nodes,input_size,output_size,length,low_w=-10,high_w=10,low_b=-10,high_b=10,activation_function="tanh",controls=False,physics=False):
-        super().__init__(n_nodes,input_size,output_size,length,low_w=-10,high_w=10,low_b=-10,high_b=10,activation_function="tanh",controls=False,physics=False)
+    def __init__(self,n_nodes,input_size,output_size,length,low_w=-1,high_w=1,low_b=-1,high_b=1,activation_function="tanh",controls=False,physics=False):
+        super().__init__(n_nodes,input_size,output_size,length,low_w=-1,high_w=1,low_b=-1,high_b=1,activation_function="tanh",controls=False,physics=False)
+       
         self.length= length
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.nodes = n_nodes
@@ -242,9 +243,10 @@ class XTFC_S(PIELM):
         self.betas = torch.ones(size=(n_nodes,output_size),requires_grad=True,dtype=torch.float)
         self.controls = controls
         self.physics = physics
-        self.z={"max":{0:500,1:1},"min":{0:0,1:0}}
+        self.z={"max":{0:40,1:1},"min":{0:0,1:0}}
         self.iters=0
         self.p = 0
+
     def train(self,accuracy, n_iterations,x_train,y_train,lambda_=1):
         
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -255,8 +257,6 @@ class XTFC_S(PIELM):
         ## Assuming x_train has the following shape, vector of time appended to vector of actions
 
          ## Assuming x_train has the following shape, vector of time appended to vector of actions
-        
-
         for i in range(x_train.shape[1]):
             z0 = -1
             zf = 1
@@ -264,13 +264,76 @@ class XTFC_S(PIELM):
             tf = self.z["max"][i]
             c = (zf-z0)/(tf-t0)
             x_train[:,i] = z0+c*(x_train[:,i]-t0)
+            
             if i==0:
                 self.c = c
+        
         self.x_train = torch.tensor(x_train,dtype=torch.float)
         self.y_train = torch.tensor(y_train,dtype=torch.float)
         h = self.get_h(self.x_train)
         dh = self.c*self.get_dh_t(self.x_train)
+        
+        init_time = self.x_train[0,0].numpy()
+        init_h=self.get_h(self.x_train[0,:])
+        init_dh=self.get_dh_t(self.x_train[0,:])
+        init_x = self.y_train[0,0]
+        init_dx = self.y_train[len(self.x_train),0]
+        init_theta = self.y_train[0,1]
+        init_dtheta = self.y_train[len(self.x_train),1]
+        
+        support_function_matrix = np.array([[init_time,init_time**2],[1,2*init_time]])        
+        coefficients_matrix = torch.tensor(np.linalg.inv(support_function_matrix),dtype=torch.float)
+        free_support_function_matrix = torch.transpose(torch.vstack((self.x_train[:,0],self.x_train[:,0]**2)),0,1)
+        d_free_support_function_matrix = torch.transpose(torch.vstack((torch.ones(size=self.x_train[:,0].shape),2*self.x_train[:,0])),0,1)
+        phis = torch.matmul(free_support_function_matrix,coefficients_matrix)
+        d_phis = torch.matmul(d_free_support_function_matrix,coefficients_matrix)
+        
+        phi1 = phis[:,0].reshape(len(self.x_train),1)
+        phi2 = phis[:,1].reshape(len(self.x_train),1)
+        
+        
+
+        d_phi1 = d_phis[:,0].reshape(len(self.x_train),1)
+        d_phi2 = d_phis[:,1].reshape(len(self.x_train),1)
+        
+        phi1_h_init = torch.matmul(-phi1,init_h)
+        phi1_x_init = phi1*init_x
+        phi1_x_init =phi1_x_init.reshape(len(self.x_train))
+        phi1_theta_init = phi1*init_theta
+        phi1_theta_init=phi1_theta_init.reshape(len(self.x_train))
+
+        phi2_dh_init = torch.matmul(-phi2,init_dh)
+        phi2_dx_init = phi2*init_dx
+        phi2_dx_init = phi2_dx_init.reshape(len(self.x_train))
+
+        phi2_dtheta_init = phi2*init_dtheta
+        phi2_dtheta_init = phi2_dtheta_init.reshape(len(self.x_train))
+
+        dphi1_h_init = torch.matmul(-d_phi1,init_h)
+        dphi1_x_init = d_phi1*init_x
+        dphi1_x_init  = dphi1_x_init.reshape(len(self.x_train))
+        dphi1_theta_init = d_phi1*init_theta
+        dphi1_theta_init =dphi1_theta_init.reshape(len(self.x_train))
+
+        dphi2_dh_init = torch.matmul(-d_phi2,init_dh)
+        dphi2_dx_init = d_phi2*init_dx
+        
+        dphi2_dx_init= dphi2_dx_init.reshape(len(self.x_train))
+        dphi2_dtheta_init = d_phi2*init_dtheta
+        dphi2_dtheta_init = dphi2_dtheta_init.reshape(len(self.x_train))
+
+        h = h.add(phi1_h_init).add(phi2_dh_init)
+        dh = dh.add(dphi1_h_init).add(dphi2_dh_init)
+        
+        self.y_train[0:len(self.x_train),0]=self.y_train[0:len(self.x_train),0].add(-phi1_x_init).add(-phi2_dx_init/self.c)
+        self.y_train[0:len(self.x_train),1]=self.y_train[0:len(self.x_train),1].add(-phi1_theta_init).add(-phi2_dtheta_init/self.c)
+        self.y_train[len(self.x_train):,0]=self.y_train[len(self.x_train):,0].add(-dphi1_x_init).add(-dphi2_dx_init/self.c)
+        self.y_train[len(self.x_train):,1]=self.y_train[len(self.x_train):,1].add(-dphi1_theta_init).add(-dphi2_dtheta_init/self.c)
+        
         h = torch.vstack((h,dh))
+        y_pred =torch.matmul(h,self.betas)
+        print(len(self.x_train), "number of samples")
+        print(((y_pred-self.y_train)**2).mean(),"before iteration")
         if self.iters==0:
             self.p = torch.linalg.pinv(torch.matmul(torch.transpose(h,0,1),h))
             self.betas = torch.matmul(torch.matmul(self.p,torch.transpose(h,0,1)),self.y_train)
@@ -283,11 +346,31 @@ class XTFC_S(PIELM):
             self.p = self.p - update
             differential = (self.y_train-torch.matmul(h,self.betas))
             update = torch.matmul(torch.matmul(self.p,torch.transpose(h,0,1)),differential)
+            
             self.betas +=  update 
         y_pred =torch.matmul(h,self.betas)
         self.iters+=1 
-        print(((y_pred-self.y_train)**2).mean(),"iter:%i",self.iters)
-        
+        print(((y_pred-self.y_train)**2).mean(),"after iteration:%i",self.iters)
+        # plt.figure()
+        # plt.plot(y_pred[0:len(self.x_train),0].detach().numpy(),marker="v")
+        # plt.plot(self.y_train[0:len(self.x_train),0].detach().numpy())
+        # plt.title("position prediction")
+        # plt.show()
+        # plt.figure()
+        # plt.plot(y_pred[len(self.x_train):,0].detach().numpy(),marker="v")
+        # plt.plot(self.y_train[len(self.x_train):,0].detach().numpy())
+        # plt.title("speed prediction")
+        # plt.show()
+        # plt.figure()
+        # plt.plot(y_pred[0:len(self.x_train),1].detach().numpy(),marker="v")
+        # plt.plot(self.y_train[0:len(self.x_train),1].detach().numpy())
+        # plt.title("angle prediction")
+        # plt.show()
+        # plt.figure()
+        # plt.plot(y_pred[len(self.x_train):,1].detach().numpy(),marker="v")
+        # plt.plot(self.y_train[len(self.x_train):,1].detach().numpy())
+        # plt.title("angle speed prediction")
+        # plt.show()
 
     def predict_jacobian(self,betas):
         
@@ -545,7 +628,7 @@ class XTFC_Q(PIELM):
         self.nodes = n_nodes
         self.W = (torch.randn(size=(n_nodes,input_size),dtype=torch.float)*(high_w-low_w)+low_w)
         self.b = (torch.randn(size=(n_nodes,1),dtype=torch.float)*(high_b-low_b)+low_b)
-        self.betas = torch.ones(size=(output_size*n_nodes,),requires_grad=True,dtype=torch.float)
+        self.betas = torch.randn(size=(output_size*n_nodes,),requires_grad=True,dtype=torch.float)
         self.controls = controls
         self.physics = physics
         self.epsilon = 1
@@ -558,7 +641,8 @@ class XTFC_Q(PIELM):
         count = 0
         error = 100
         self.lambda_ = lambda_
-        
+        print(x_train.shape)
+        input("hey")
         ## Assuming x_train has the following shape, vector of time appended to vector of actions
         for i in range(x_train.shape[1]):
             z0 = -1
@@ -619,22 +703,21 @@ class XTFC_Q(PIELM):
     
     def pred(self,x):
         
-        for i in range(len(x)):
+        for i in range(x.shape[1]):
             z0 = -1
             zf = 1
-            t0 = self.z["min"][i]
-            tf = self.z["max"][i]
+            t0 = x[0,i]
+            tf = x[-1,i]
             c = (zf-z0)/(tf-t0)
-            x[i] = z0+c*(x[i]-t0)
-        
+            x[:,i] = z0+c*(x[:,i]-t0)
         x = torch.tensor(np.array(x),dtype=torch.float)
         h = self.get_h(x)
-        dh_i = self.get_dh_i(x)
+        # dh_i = self.get_dh_i(x)
         bq_1 = self.betas[0:self.nodes]
         bq_2 = self.betas[self.nodes:self.nodes*2]
         
         hq_1 = torch.matmul(h,bq_1)
         hq_2 = torch.matmul(h,bq_2)
         # dhq = self.c*torch.matmul(dh_i,bq)
-        return torch.vstack((hq_1,hq_2))
+        return torch.transpose(torch.vstack((hq_1,hq_2)),0,1)
         # return torch.vstack((hq,dhq))
