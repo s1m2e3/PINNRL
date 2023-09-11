@@ -12,6 +12,29 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+def predictFuture(qNetwork,transferNetwork,state):
+    actions = []
+    time = np.arange(50)
+    for i in range(50):
+        pred = qValueNetwork.pred(x=state).detach()
+        actionPrediction = np.argmax(pred[:,0].numpy())
+        # new_states = transferNetwork.pred
+    return qNetwork
+
+
+def trainQExistingData(network,new_df):
+    for j in new_df[11].unique():
+        
+        sub_df = new_df[new_df[11]==j]
+        current_state = np.array(sub_df[[0,1,2,3]])
+        next_state = np.array(sub_df[[5,6,7,8]])
+        rewards = np.array(sub_df[9])
+        q_pred = network.pred(x=next_state).detach().numpy()
+        q_indexes = np.argmax(q_pred,axis=1)
+        y_train = np.array([q_pred[i,q_indexes[i]]for i in range(len(q_pred))])*GAMMA+rewards
+        _,_,_,_=qValueNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=current_state,y_train=y_train)
+    return network
+
 def extract(df,newDf):
 
     for i in df.index:
@@ -65,7 +88,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward','count','episode'))
 
-n_nodes = 15
+n_nodes = 512
 BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 0.9
@@ -73,7 +96,7 @@ EPS_END = 0.05
 EPS_DECAY = 1000
 TAU = 0.005
 LR = 1e-4
-simEpisodes = 20
+simEpisodes = 1000
 simTrainings = 100
 
 # Get number of actions from gym action space
@@ -82,85 +105,122 @@ n_actions = env.action_space.n
 # Get the number of state observations
 state, info = env.reset()
 n_observations = len(state)
-
-
-
 qValueNetwork = XTFC_Q(n_nodes=n_nodes,input_size=n_observations,output_size=n_actions,length=0,epsilon=1)
-
+transferFunctionNetwork = XTFC_S(n_nodes=64,input_size=n_actions,output_size=int(n_observations/2),length=0)
 memory = ReplayMemory(10000)
 episode_durations = []
 data = {}
-for i in range(simEpisodes):
-    count = 0
-    done = False
-    state,info = env.reset()
-    data[i]={"state":[],"action":[],"next_state":[],"reward":[]}
-    while not done:
-        if qValueNetwork.epsilon<random.random():
-            pred =qValueNetwork.pred(x=state).detach()
-            actionPrediction = np.argmax(pred[:,0].numpy())
-        else: 
-            
-            actionPrediction = random.choice([0,1])
-            qValueNetwork.epsilon += qValueNetwork.epsilon -qValueNetwork.epsilon_decay
-            
+total_rewards={"elm":{},"random":{}}
+plt.figure()
+for name in ["elm",'random']:
+    
+    for i in range(simEpisodes):
+        count = 0
+        done = False
+        state,info = env.reset()
+        data[i]={"state":[],"action":[],"next_state":[],"reward":[]}
+        # if i % 21==0 and i>0:
+            # qValueNetwork=predictFuture(transferFunctionNetwork,qValueNetwork,state)
+    
         
-        next_state, reward, terminated, truncated, _ = env.step(actionPrediction)
-        memory.push(state, actionPrediction, next_state, reward,count,i)
-        data[i]["state"].append(state)
-        data[i]["action"].append(actionPrediction)
-        data[i]["next_state"].append(next_state)
-        data[i]["reward"].append(reward)
+        while not done:
+            if qValueNetwork.epsilon<random.random():
+                pred = qValueNetwork.pred(x=state).detach()
+                actionPrediction = np.argmax(pred[:,0].numpy())
+                # input("hey")
+            
+            else: 
+            
+                actionPrediction = random.choice([0,1])
+                qValueNetwork.epsilon -= qValueNetwork.epsilon_decay
+
+            next_state, reward, terminated, truncated, _ = env.step(actionPrediction)
+            memory.push(state, actionPrediction, next_state, reward,count,i)
+            data[i]["state"].append(state)
+            data[i]["action"].append(actionPrediction)
+            data[i]["next_state"].append(next_state)
+            data[i]["reward"].append(reward)
+            
+            state = next_state
+            done = terminated or truncated
+
+            if terminated:
+                next_state = None
+
+            if done:
+                episode_durations.append(count + 1)
+                done=True
+            count+= 1
+
+        total_rewards[name][i] = sum(data[i]["reward"])
         
-        state = next_state
-        done = terminated or truncated
-
-        if terminated:
-            next_state = None
-
-        if done:
-            episode_durations.append(count + 1)
-            done=True
-        count+= 1
-
-df = pd.DataFrame.from_dict(data).T
-accuracy = 1e-4
-iterations = 1
-new_df = pd.DataFrame()
-new_df = extract(df,new_df)
-transferFunctionNetwork = XTFC_S(n_nodes=15,input_size=n_actions,output_size=int(n_observations/2),length=0)
-for i in new_df[11].unique():
-    sub_df = new_df[new_df[11]==i]
-    x_train = np.array(sub_df[[9,4]])
-    y_train_t = np.array(sub_df[[5,7]])
-    y_train_dt = np.array(sub_df[[6,8]])
-    y_train = np.concatenate((y_train_t,y_train_dt))
-    transferFunctionNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=x_train,y_train=y_train)
-
-for i in range(3):
-    for i in new_df[11].unique():
-        sub_df = new_df[new_df[11]==i]
-        current_state = np.array(sub_df[[0,1,2,3]])
-        next_state = np.array(sub_df[[5,6,7,8]])
-        rewards = np.array(sub_df[9])
-        q_pred = qValueNetwork.pred(x=next_state).detach().numpy()
-        q_indexes = np.argmax(q_pred,axis=1)
-        y_train = np.array([q_pred[i,q_indexes[i]]for i in range(len(q_pred))])*GAMMA+rewards
-        qValueNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=current_state,y_train=y_train)
+        if  i%80==0 and i>0:
+            episodes = list(data)
+            passed_data = episodes[-80:]
+            res = dict((k, data[k]) for k in passed_data if k in data)
+            df = pd.DataFrame.from_dict(res).T
+            accuracy = 1e-4
+            iterations = 1
+            new_df = pd.DataFrame()
+            new_df = extract(df,new_df)
+            
+            for i in new_df[11].unique():
+                sub_df = new_df[new_df[11]==i]
+                x_train = np.array(sub_df[[9,4]])
+                y_train_t = np.array(sub_df[[5,7]])
+                y_train_dt = np.array(sub_df[[6,8]])
+                y_train = np.concatenate((y_train_t,y_train_dt))
+                transferFunctionNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=x_train,y_train=y_train)
+            
+            qValueNetwork=trainQExistingData(qValueNetwork,new_df)
+            print("updated Network")
+print(qValueNetwork.epsilon)
+plt.plot(list(total_rewards["elm"]),list(total_rewards["elm"].values()))
+plt.plot(list(total_rewards["random"]),list(total_rewards["random"].values()))        
+plt.show()
 
 
-    #     pred =qValueNetwork.pred(x=state).detach()
-    #     state_action_values = policy_net(state_batch).gather(1, action_batch)
+# comparison={}
+# for i in range(1):
+#     comparison[i]={}
+#     for j in new_df[11].unique():
+#         comparison[i][j]={}
+#         sub_df = new_df[new_df[11]==j]
+#         current_state = np.array(sub_df[[0,1,2,3]])
+#         next_state = np.array(sub_df[[5,6,7,8]])
+#         rewards = np.array(sub_df[9])
+#         q_pred = qValueNetwork.pred(x=next_state).detach().numpy()
+#         q_indexes = np.argmax(q_pred,axis=1)
+#         y_train = np.array([q_pred[i,q_indexes[i]]for i in range(len(q_pred))])*GAMMA+rewards
+#         comparison[i][j]["1b"],comparison[i][j]["1a"],comparison[i][j]["2b"],comparison[i][j]["2a"]=qValueNetwork.train(accuracy=accuracy,n_iterations=iterations,x_train=current_state,y_train=y_train)
 
-    # # Compute V(s_{t+1}) for all next states.
-    # # Expected values of actions for non_final_next_states are computed based
-    # # on the "older" target_net; selecting their best reward with max(1)[0].
-    # # This is merged based on the mask, such that we'll have either the expected
-    # # state value or 0 in case the state was final.
-    # next_state_values = torch.zeros(BATCH_SIZE, device=device)
-    # with torch.no_grad():
-    #     next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
-    # # Compute the expected Q values
-    # expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+# fig,(ax1,ax2) = plt.subplots(1,2)
+# b1 = []
+# a1 = []
+# b2 = []
+# a2 = []
+# for i in range(1):
+#     b1_list = []
+#     a1_list = []
+#     b2_list = []
+#     a2_list = []
+#     for j in new_df[11].unique():   
+#         b1_list.append(comparison[i][j]["1b"])
+#         b2_list.append(comparison[i][j]["2b"])
+#         a1_list.append(comparison[i][j]["1a"])
+#         a2_list.append(comparison[i][j]["2a"])
+    
+#     b1.append(np.mean(b1_list))
+#     a1.append(np.mean(b2_list))
+#     b2.append(np.mean(a1_list))
+#     a2.append(np.mean(a2_list))
 
 
+#     ax1.plot(b1_list,label="before optim action 1")
+#     ax1.plot(a1_list,label="after optim action 1")
+#     ax2.plot(b2_list,label="before optim action 2")
+#     ax2.plot(a2_list,label="after optim action 2")
+
+# ax1.legend()
+# ax2.legend()
+# plt.show()
