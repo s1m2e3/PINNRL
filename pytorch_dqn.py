@@ -12,7 +12,24 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
+                        ('state', 'action', 'next_state', 'reward',"episode"))
+
+
+def customReward(state):
+    maxX = 2.4
+    minX = -2.4
+    maxDX = 10
+    minDX = -10
+    maxTheta = 0.2095
+    minTheta = -0.2095
+    maxDTheta = 10
+    minDTheta  = -10
+    goalX = abs(state[0])
+    goalDX = abs(state[1])
+    goalTheta = abs(state[2])
+    goalDTheta = abs(state[3])
+    return (goalX+goalDX+goalTheta+goalDTheta)/50
+
 
 def conver_to_lstm_data(data,sequence_length):
     data =np.array(data)
@@ -52,7 +69,7 @@ class DQN(nn.Module):
         self.layer1 = nn.Linear(n_observations, 512)
         self.layer2 = nn.Linear(512, 512)
         self.layer3 = nn.Linear(512, n_actions)
-        self.criterion = nn.SmoothL1Loss()
+        self.criterion = nn.MSELoss()
         self.optimizer = optim.AdamW(self.parameters(), lr=0.001)
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
@@ -64,6 +81,8 @@ class DQN(nn.Module):
         return self.layer3(x)
     def train(self,num_epochs,x,y):
         x=torch.tensor(x,dtype=torch.float).reshape(len(x),25)
+        # print(y.shape)
+        y=torch.tensor(y,dtype=torch.float)
         for i in range(num_epochs):
             pred = self.forward(x)
             self.optimizer.zero_grad()
@@ -71,8 +90,8 @@ class DQN(nn.Module):
             # loss -= torch.norm(pred)*0.001
             loss.backward()
             self.optimizer.step()
-            if i%100==0:
-                print(loss,"loss at epoch %i",i)
+            # if i%100==0:
+                # print(loss,"loss at epoch %i",i)
         print(loss,"loss at epoch %i",i)
         
 env = gym.make("CartPole-v1")
@@ -167,30 +186,45 @@ def plot_durations(show_result=False):
 def optimize_model(count):
     if len(memory) < BATCH_SIZE:
         return
+    index = random.randint(a=0,b=len(memory.memory)-1)
+    episode_index = memory.memory[index].episode
+    transitions_indexes = [memory.memory[i] for i in range(len(memory.memory)) if memory.memory[i].episode == episode_index]
+    # transitions_indexes = memory.memory[transitions_indexes]
     transitions = memory.sample(BATCH_SIZE)
     
     # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
     # detailed explanation). This converts batch-array of Transitions
     # to Transition of batch-arrays.
     batch = Transition(*zip(*transitions))
-
+    batch_indexes = Transition(*zip(*transitions_indexes))
     # Compute a mask of non-final states and concatenate the batch elements
     # (a final state would've been the one after which simulation ended)
     non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                           batch.next_state)), device=device, dtype=torch.bool)
     non_final_next_states = torch.cat([s for s in batch.next_state
                                                 if s is not None])
-    indexes_not_none = [np.where(non_final_next_states.numpy()==non_final_next_states.numpy()[i,:])[0][0] for i in range(len(non_final_next_states))]
+    
+    non_final_mask_indexes = torch.tensor(tuple(map(lambda s: s is not None,
+                                          batch_indexes.next_state)), device=device, dtype=torch.bool)
+    non_final_next_states_indexes = torch.cat([s for s in batch_indexes.next_state
+                                                if s is not None])
+
+
+    indexes_not_none = [np.where(non_final_next_states_indexes.numpy()==non_final_next_states_indexes.numpy()[i,:])[0][0] for i in range(len(non_final_next_states_indexes))]
     test_index = np.arange(len(indexes_not_none))
     for i in range(len(indexes_not_none)):
         if indexes_not_none[i] != test_index[i]:
             break
     indexes_not_none=indexes_not_none[:i]
     state_batch = torch.cat(batch.state)
-    
     action_batch = torch.cat(batch.action)
     reward_batch = torch.cat(batch.reward)
-    states_actions = torch.hstack((state_batch,action_batch))[indexes_not_none,:]
+
+    state_batch_indexes = torch.cat(batch_indexes.state)
+    action_batch_indexes = torch.cat(batch_indexes.action)
+    reward_batch_indexes = torch.cat(batch_indexes.reward)
+
+    states_actions_indexes = torch.hstack((state_batch_indexes,action_batch_indexes))[indexes_not_none,:]
     # predicted_states = transition_net(states_actions)
     # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
     # columns of actions taken. These are the actions which would've been taken
@@ -218,34 +252,23 @@ def optimize_model(count):
     # In-place gradient clipping
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
-    # print(len(states_actions))
     # print(SEQUENCE_LENGTH)
-    states_actions=conver_to_lstm_data(states_actions,SEQUENCE_LENGTH)
-    non_final_next_states=non_final_next_states[1+SEQUENCE_LENGTH:]
+    
+    states_actions = conver_to_lstm_data(states_actions_indexes,SEQUENCE_LENGTH)
+    # non_final_next_states = conver_to_lstm_data(non_final_next_states_indexes,SEQUENCE_LENGTH-3)
+    non_final_next_states_indexes = non_final_next_states_indexes[SEQUENCE_LENGTH+1:,:]
+    
+    # non_final_next_states=non_final_next_states[1+SEQUENCE_LENGTH:]
     # non_final_next_states =conver_to_lstm_data(non_final_next_states,SEQUENCE_LENGTH-3)
     if count %15 ==0:
+        transition_net.train(100,states_actions,non_final_next_states_indexes)
+        passed = torch.hstack((state_batch_indexes[0:5,:],action_batch_indexes[0:5]))
         
-        y_pred = transition_net(torch.tensor(states_actions,dtype=torch.float).reshape(len(states_actions),25))
-        plt.figure()
-        ax1=plt.subplot(2,2,1)
-        ax2=plt.subplot(2,2,2)
-        ax3=plt.subplot(2,2,3)
-        ax4=plt.subplot(2,2,4)
-        x = np.arange(len(y_pred))
-        ax1.plot(x,y_pred[:,0].detach().numpy())
-        ax1.plot(x,non_final_next_states[:,0].detach().numpy())
-        ax2.plot(x,y_pred[:,1].detach().numpy())
-        ax2.plot(x,non_final_next_states[:,1].detach().numpy())
-        ax3.plot(x,y_pred[:,2].detach().numpy())
-        ax3.plot(x,non_final_next_states[:,2].detach().numpy())
-        ax4.plot(x,y_pred[:,3].detach().numpy())
-        ax4.plot(x,non_final_next_states[:,3].detach().numpy())
-        plt.show()
-        input("hey")
+        for i in range(60):
+            
+            action = select_action(passed[0,0:4])
+            new_state = transition_net()
 
-
-    transition_net.train(100,states_actions,non_final_next_states)
-    
     
 if torch.cuda.is_available():
     num_episodes = 600
@@ -269,7 +292,7 @@ for i_episode in range(num_episodes):
             next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
 
         # Store the transition in memory
-        memory.push(state, action, next_state, reward)
+        memory.push(state, action, next_state, reward,i_episode)
 
         # Move to the next state
         state = next_state
@@ -289,7 +312,7 @@ for i_episode in range(num_episodes):
             episode_durations.append(t + 1)
             # plot_durations()
             break
-
+    print(i_episode)
 # print('Complete')
 # plot_durations(show_result=True)
 # plt.ioff()
