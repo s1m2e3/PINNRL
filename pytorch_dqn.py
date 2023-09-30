@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import seaborn as sns
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 class DQN(nn.Module):
 
@@ -28,21 +29,19 @@ class DQN(nn.Module):
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, x):
-        
         # x=torch.tensor(x,dtype=torch.float).reshape(len(x),25)
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
         return self.layer3(x)
+    def forward_q(self, x):
+        x = F.relu(torch.matmul(self.layer1.weight.data[:,0:4],torch.transpose(x,0,1)).add(self.layer1.bias.data.reshape(len(self.layer1.bias.data),1)))
+        x = F.relu(self.layer2(torch.transpose(x,0,1)))
+        return self.layer3(x)[:,0:2]
     def forward_next_state(self, x):
         
-        # x=torch.tensor(x,dtype=torch.float).reshape(len(x),25)
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
-        x = F.relu(self.layer3(x))
-        argument = torch.argmax(x,dim=1).reshape(len(x),1)
-        x = torch.gather(x,1,argument)
-        x = F.relu(self.layer4(x))
-        return self.layer5(x)
+        return self.layer3(x)[:,2:]
     
     def train(self,num_epochs,x,y):
         
@@ -110,7 +109,7 @@ class ReplayMemory(object):
     def __len__(self):
         return len(self.memory)
 
-def select_action(state):
+def select_action(state,thoug):
     global steps_done
     sample = random.random()
     eps_threshold = EPS_END + (EPS_START - EPS_END) * \
@@ -121,7 +120,7 @@ def select_action(state):
             # t.max(1) will return the largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return policy_net(state).max(1)[1].view(1, 1)
+            return policy_net(state).max(1)[1].view(1, 1) if not thoug else policy_net.forward_q(state).max(1)[1].view(1, 1)
     else:
         return torch.tensor([[env.action_space.sample()]], device=device, dtype=torch.long)
 
@@ -151,7 +150,7 @@ def plot_durations(show_result=False):
         else:
             display.display(plt.gcf())
 
-def optimize_model(count,though):
+def optimize_model(count,though,additional):
     if len(memory) < BATCH_SIZE:
         return
     
@@ -179,8 +178,13 @@ def optimize_model(count,though):
     # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
     # columns of actions taken. These are the actions which would've been taken
     # for each batch state according to policy_net
-    state_action_values = policy_net(state_batch).gather(1, action_batch)
-    next_states_prediction = policy_net.forward_next_state(state_batch)
+    if though:
+        state_action_values = policy_net.forward_q(state_batch).gather(1, action_batch)
+        state_action = torch.cat((state_batch,action_batch),1)
+        next_states_prediction = policy_net.forward_next_state(state_action)
+    else:
+        state_action_values = policy_net(state_batch).gather(1, action_batch)
+    
     # Compute V(s_{t+1}) for all next states.
     # Expected values of actions for non_final_next_states are computed based
     # on the "older" target_net; selecting their best reward with max(1)[0].
@@ -189,20 +193,39 @@ def optimize_model(count,though):
     next_state_values = torch.zeros(BATCH_SIZE, device=device)
     next_state_true = torch.zeros((BATCH_SIZE,4), device=device)
     with torch.no_grad():
-        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
-        next_state_true[non_final_mask,:] = non_final_next_states
+        if though:
+            next_state_values[non_final_mask] = target_net.forward_q(non_final_next_states).max(1)[0]
+            next_state_true[non_final_mask,:] = non_final_next_states
+        else:
+
+            next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
+            next_state_true[non_final_mask,:] = non_final_next_states
     # Compute the expected Q values
+    print(reward_batch)
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
     
     # Compute Huber loss
     criterion = nn.SmoothL1Loss()
+   
     loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
     if though==True and t<200:
-        if t%50==0:
+        if t%50==0 and t>1:
             print(criterion(next_states_prediction,next_state_true))
-        loss+= criterion(next_states_prediction,next_state_true)*0.01
-        loss+= criterion(next_states_prediction[:,0],torch.zeros(next_states_prediction[:,0].shape))*0.01
-        loss+= criterion(next_states_prediction[:,2],torch.zeros(next_states_prediction[:,0].shape))*0.01
+        loss+= criterion(next_states_prediction,next_state_true)
+        if additional:
+        # if criterion(next_states_prediction,next_state_true).item()<0.001 and additional:
+            
+            next_action = policy_net.forward_q(next_states_prediction).gather(1, action_batch)
+            
+            next_state_action = torch.cat((next_states_prediction,next_action),1)
+            next_next_state = policy_net.forward_next_state(next_state_action)
+            # next_state_values[non_final_mask] = target_net.forward_q(non_final_next_states).max(1)[0]
+            # next_state_true[non_final_mask,:] = non_final_next_states
+
+            loss+= criterion(next_next_state[:,0],torch.zeros(next_states_prediction[:,0].shape))
+            loss+= criterion(next_next_state[:,2],torch.zeros(next_states_prediction[:,0].shape))
+            if t%50==0 and t>1:
+                print("stepped on the second prediction")
     # Optimize the model
     optimizer.zero_grad()
     loss.backward(retain_graph=True)
@@ -288,69 +311,136 @@ n_actions = env.action_space.n
 if torch.cuda.is_available():
     num_episodes = 600
 else:
-    num_episodes = 100
+    num_episodes = 200
 plt.figure(figsize=(20,10))
 for thoug in [True,False]:
-    rewards={}
-    state, info = env.reset()
-    n_observations = len(state)
-    policy_net = DQN(n_nodes,n_observations, n_actions).to(device)
-    target_net = DQN(n_nodes,n_observations, n_actions).to(device)
-    # transition_net = DQN((n_observations+1)*SEQUENCE_LENGTH,n_observations).to(device)
-    target_net.load_state_dict(policy_net.state_dict())
-
-    optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
-    memory = ReplayMemory(10000)
-
-    steps_done = 0
-
-    episode_durations = []
-
-    for i_episode in range(num_episodes):
-    
-        rewards[i_episode]=[]
-        # Initialize the environment and get it's state
-        state, info = env.reset()
-        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-        for t in count():
-            action = select_action(state)
-            observation, reward, terminated, truncated, _ = env.step(action.item())
-            rewards[i_episode].append(reward)
-            reward = torch.tensor([reward], device=device)
-            done = terminated or truncated
-            
-            if terminated:
-                next_state = None
+    if thoug:
+        for additional in [True,False]:
+            rewards={}
+            state, info = env.reset()
+            n_observations = len(state)
+            if thoug:
+                policy_net = DQN(n_nodes,n_observations+1, n_actions+n_observations).to(device)
+                target_net = DQN(n_nodes,n_observations+1, n_actions+n_observations).to(device)
             else:
-                next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
+                policy_net = DQN(n_nodes,n_observations, n_actions).to(device)
+                target_net = DQN(n_nodes,n_observations, n_actions).to(device)
+                # transition_net = DQN((n_observations+1)*SEQUENCE_LENGTH,n_observations).to(device)
+                target_net.load_state_dict(policy_net.state_dict())
 
-            # Store the transition in memory
-            memory.push(state, action, next_state, reward,i_episode)
+            optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
+            scheduler = ReduceLROnPlateau(optimizer, 'min')
+            memory = ReplayMemory(10000)
 
-            # Move to the next state
-            state = next_state
+            steps_done = 0
+
+            episode_durations = []
+
+            for i_episode in range(num_episodes):
             
-            # Perform one step of the optimization (on the policy network)
-            optimize_model(t,thoug)
+                rewards[i_episode]=[]
+                # Initialize the environment and get it's state
+                state, info = env.reset()
+                state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+                for t in count():
+                    action = select_action(state,thoug)
+                    observation, reward, terminated, truncated, _ = env.step(action.item())
+                    rewards[i_episode].append(reward)
+                    reward = torch.tensor([reward], device=device)
+                    done = terminated or truncated
+                    
+                    if terminated:
+                        next_state = None
+                    else:
+                        next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
 
-            # Soft update of the target network's weights
-            # θ′ ← τ θ + (1 −τ )θ′
-            target_net_state_dict = target_net.state_dict()
-            policy_net_state_dict = policy_net.state_dict()
-            for key in policy_net_state_dict:
-                target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
-            target_net.load_state_dict(target_net_state_dict)
+                    # Store the transition in memory
+                    memory.push(state, action, next_state, reward,i_episode)
 
-            if done:
-                episode_durations.append(t + 1)
-                # plot_durations()
-                break
-        print(i_episode)
-    rewards_average = [sum(rewards[i]) for i in list(rewards)]
+                    # Move to the next state
+                    state = next_state
+                    
+                    # Perform one step of the optimization (on the policy network)
+                    optimize_model(t,thoug,additional)
 
-    plt.plot(list(rewards),rewards_average)
+                    # Soft update of the target network's weights
+                    # θ′ ← τ θ + (1 −τ )θ′
+                    target_net_state_dict = target_net.state_dict()
+                    policy_net_state_dict = policy_net.state_dict()
+                    for key in policy_net_state_dict:
+                        target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
+                    target_net.load_state_dict(target_net_state_dict)
+
+                    if done:
+                        episode_durations.append(t + 1)
+                        # plot_durations()
+                        break
+                print(i_episode,t)
+            rewards_average = [sum(rewards[i]) for i in list(rewards)]
+
+            plt.plot(list(rewards),rewards_average)
+    else:
+
+        rewards={}
+        state, info = env.reset()
+        n_observations = len(state)
+        policy_net = DQN(n_nodes,n_observations, n_actions).to(device)
+        target_net = DQN(n_nodes,n_observations, n_actions).to(device)
+            # transition_net = DQN((n_observations+1)*SEQUENCE_LENGTH,n_observations).to(device)
+        target_net.load_state_dict(policy_net.state_dict())
+        scheduler = ReduceLROnPlateau(optimizer, 'min')
+        optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
+        memory = ReplayMemory(10000)
+
+        steps_done = 0
+
+        episode_durations = []
+
+        for i_episode in range(num_episodes):
+        
+            rewards[i_episode]=[]
+            # Initialize the environment and get it's state
+            state, info = env.reset()
+            state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+            for t in count():
+                action = select_action(state,thoug)
+                observation, reward, terminated, truncated, _ = env.step(action.item())
+                rewards[i_episode].append(reward)
+                reward = torch.tensor([reward], device=device)
+                done = terminated or truncated
+                
+                if terminated:
+                    next_state = None
+                else:
+                    next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
+
+                # Store the transition in memory
+                memory.push(state, action, next_state, reward,i_episode)
+
+                # Move to the next state
+                state = next_state
+                
+                # Perform one step of the optimization (on the policy network)
+                optimize_model(t,thoug,additional)
+
+                # Soft update of the target network's weights
+                # θ′ ← τ θ + (1 −τ )θ′
+                target_net_state_dict = target_net.state_dict()
+                policy_net_state_dict = policy_net.state_dict()
+                for key in policy_net_state_dict:
+                    target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
+                target_net.load_state_dict(target_net_state_dict)
+
+                if done:
+                    episode_durations.append(t + 1)
+                    # plot_durations()
+                    break
+            print(i_episode,)
+        rewards_average = [sum(rewards[i]) for i in list(rewards)]
+
+        plt.plot(list(rewards),rewards_average)
 plt.title("Cart Pole v1 PINN DQN Vs Base DQN",fontsize="24",fontweight="bold")
-plt.legend(["Physics Informed DQN","Regular DQN"])
+plt.legend(["Model Informed Multi Task DQN","Multi Task DQN","Regular DQN"])
 plt.xlabel("Episode",fontsize="18",fontweight="bold")
 plt.ylabel("Duration",fontsize="18",fontweight="bold")
 plt.xticks(fontsize=18)
